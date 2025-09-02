@@ -636,6 +636,44 @@ if proc_table:
 
     st.markdown("### 6-3. 可視化")
     with st.expander("チャート（Line/Bar/Area/Scatter/Hist/Box）", expanded=True):
+        chart_type = st.selectbox("チャートタイプ", ["line","bar","area","scatter","hist","box"], index=0)
+        x_col = st.selectbox("X軸", df.columns.tolist(), index=0)
+        y_cols = st.multiselect("Y軸（複数可・line/bar/area）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])][:1])
+        if chart_type in ["line","bar","area"] and x_col and y_cols:
+            plot_df = df[[x_col] + y_cols].dropna()
+            plot_df = plot_df.sort_values(x_col)
+            if chart_type == "line":
+                st.line_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
+            elif chart_type == "bar":
+                st.bar_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
+            elif chart_type == "area":
+                # area は簡易的に line_chart を流用
+                st.area_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
+        elif chart_type == "scatter":
+            x_s = st.selectbox("X（数値）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="scx")
+            y_s = st.selectbox("Y（数値）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="scy")
+            if x_s and y_s:
+                plot_df = df[[x_s, y_s]].dropna()
+                st.scatter_chart(plot_df, x=x_s, y=y_s, use_container_width=True)
+        elif chart_type == "hist":
+            num_h = st.selectbox("対象数値列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="histn")
+            bins = st.slider("ビン数", min_value=5, max_value=100, value=30)
+            if num_h:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots()
+                ax.hist(pd.to_numeric(df[num_h], errors="coerce").dropna(), bins=bins)
+                ax.set_xlabel(num_h); ax.set_ylabel("count")
+                st.pyplot(fig, use_container_width=True)
+        elif chart_type == "box":
+            num_b = st.multiselect("箱ひげ対象列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])][:1])
+            if num_b:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots()
+                ax.boxplot([pd.to_numeric(df[c], errors="coerce").dropna() for c in num_b], labels=num_b, vert=True)
+                st.pyplot(fig, use_container_width=True)
+
+
+
 with st.expander("時系列（範囲指定・各列の可視化）", expanded=True):
     st.markdown("#### 時系列（範囲指定・各列の可視化）")
     # 日時列の選択
@@ -684,42 +722,6 @@ with st.expander("時系列（範囲指定・各列の可視化）", expanded=Tr
                                 st.line_chart(plot_df[[dt_col2, col]].dropna(), x=dt_col2, y=col, use_container_width=True)
                 else:
                     st.info("対象の数値列を選択してください。")
-
-        chart_type = st.selectbox("チャートタイプ", ["line","bar","area","scatter","hist","box"], index=0)
-        x_col = st.selectbox("X軸", df.columns.tolist(), index=0)
-        y_cols = st.multiselect("Y軸（複数可・line/bar/area）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])][:1])
-        if chart_type in ["line","bar","area"] and x_col and y_cols:
-            plot_df = df[[x_col] + y_cols].dropna()
-            plot_df = plot_df.sort_values(x_col)
-            if chart_type == "line":
-                st.line_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
-            elif chart_type == "bar":
-                st.bar_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
-            elif chart_type == "area":
-                # area は簡易的に line_chart を流用
-                st.area_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
-        elif chart_type == "scatter":
-            x_s = st.selectbox("X（数値）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="scx")
-            y_s = st.selectbox("Y（数値）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="scy")
-            if x_s and y_s:
-                plot_df = df[[x_s, y_s]].dropna()
-                st.scatter_chart(plot_df, x=x_s, y=y_s, use_container_width=True)
-        elif chart_type == "hist":
-            num_h = st.selectbox("対象数値列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="histn")
-            bins = st.slider("ビン数", min_value=5, max_value=100, value=30)
-            if num_h:
-                import matplotlib.pyplot as plt
-                fig, ax = plt.subplots()
-                ax.hist(pd.to_numeric(df[num_h], errors="coerce").dropna(), bins=bins)
-                ax.set_xlabel(num_h); ax.set_ylabel("count")
-                st.pyplot(fig, use_container_width=True)
-        elif chart_type == "box":
-            num_b = st.multiselect("箱ひげ対象列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])][:1])
-            if num_b:
-                import matplotlib.pyplot as plt
-                fig, ax = plt.subplots()
-                ax.boxplot([pd.to_numeric(df[c], errors="coerce").dropna() for c in num_b], labels=num_b, vert=True)
-                st.pyplot(fig, use_container_width=True)
 
 
 # =============================
