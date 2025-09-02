@@ -675,9 +675,10 @@ if proc_table:
 
 
 with st.expander("時系列（範囲指定・各列の可視化）", expanded=True):
+    tsdf = src.copy()
     st.markdown("#### 時系列（範囲指定・各列の可視化）")
     # 日時列の選択
-    dt_candidates = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    dt_candidates = [c for c in tsdf.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
     if not dt_candidates:
         st.info("まず『前処理』で日付として解釈する列を指定し、日時列を作成してください。")
     else:
@@ -697,9 +698,9 @@ with st.expander("時系列（範囲指定・各列の可視化）", expanded=Tr
             if isinstance(rng, tuple) and len(rng) == 2:
                 start_dt = pd.to_datetime(rng[0])
                 end_dt = pd.to_datetime(rng[1]) + pd.Timedelta(days=1)  # 末日を含めるため+1日
-                fdf = df[(df[dt_col2] >= start_dt) & (df[dt_col2] < end_dt)].copy()
+                fdf = tsdf[(df[dt_col2] >= start_dt) & (df[dt_col2] < end_dt)].copy()
             else:
-                fdf = df.copy()
+                fdf = tsdf.copy()
 
             # 数値列の候補
             num_cols_all = [c for c in fdf.columns if pd.api.types.is_numeric_dtype(fdf[c])]
