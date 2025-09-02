@@ -182,6 +182,23 @@ def apply_rounding(series: pd.Series, mode: str) -> pd.Series:
         return x
     return series.map(_f)
 
+def _set_current_table(name: str):
+    try:
+        if name:
+            st.session_state["current_table"] = name
+    except Exception:
+        pass
+
+def _get_default_index(options: list, current_key: str = "current_table") -> int:
+    try:
+        cur = st.session_state.get(current_key)
+        if cur in options:
+            return options.index(cur)
+    except Exception:
+        pass
+    return 0
+
+
 
 # -----------------------------
 # 初期化
@@ -284,6 +301,7 @@ st.divider()
 # =============================
 st.subheader("編集ビュー（数量と選択だけ編集可）")
 edit_table = st.selectbox("編集するテーブルを選択", [""] + cat_df["table_name"].tolist(), index=0)
+_set_current_table(edit_table)
 
 if edit_table:
     con = get_conn()
@@ -412,6 +430,7 @@ st.sidebar.divider()
 # =============================
 st.subheader("スキーマ編集（テーブル名/カラム名の変更→DB保存）")
 schema_table = st.selectbox("対象テーブル", [""] + cat_df["table_name"].tolist(), index=0, key="schema_tbl")
+_set_current_table(schema_table)
 
 if schema_table:
     # --- テーブル名の変更 ---
@@ -479,6 +498,7 @@ st.sidebar.divider()
 # =============================
 st.subheader("データ処理 & 可視化（加工 → グラフ → 保存）")
 proc_table = st.selectbox("処理対象テーブルを選択", [""] + cat_df["table_name"].tolist(), index=0, key="proc_tbl")
+_set_current_table(proc_table)
 
 def _save_df_to_db(df: pd.DataFrame, source_tag: str, note: str = "(processed)"):
     base = ensure_unique_table_name(sanitize_name(source_tag + "_proc"))
@@ -675,17 +695,30 @@ if proc_table:
 
 
 with st.expander("時系列（範囲指定・各列の可視化）", expanded=True):
-    tsdf = src.copy()
     st.markdown("#### 時系列（範囲指定・各列の可視化）")
+    # 対象テーブルの決定（前処理の選択があれば優先）
+    _opts = [""] + cat_df["table_name"].tolist()
+    if "proc_table" in locals() and proc_table:
+        ts_src_tbl = proc_table
+    else:
+        default_idx = _get_default_index(_opts, "current_table")
+        ts_src_tbl = st.selectbox("時系列の対象テーブル", _opts, index=default_idx, key="ts_src_tbl")
+    if ts_src_tbl:
+        _set_current_table(ts_src_tbl)
+        con = get_conn()
+        tsdf = con.execute(f'SELECT * FROM "{ts_src_tbl}"').fetchdf()
+    else:
+        tsdf = pd.DataFrame()
+
     # 日時列の選択
-    dt_candidates = [c for c in tsdf.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
-    if not dt_candidates:
-        st.info("まず『前処理』で日付として解釈する列を指定し、日時列を作成してください。")
+    dt_candidates = [c for c in tsdf.columns if pd.api.types.is_datetime64_any_dtype(tsdf[c])]
+    if not dt_candidates or tsdf.empty:
+        st.info("まず『前処理』で日付として解釈する列を指定するか、日時列を含むテーブルを選択してください。")
     else:
         dt_col2 = st.selectbox("日時列（時系列のX軸）", dt_candidates, index=0, key="ts_dtcol")
         # 日付範囲（データの最小～最大）
-        _min_dt = pd.to_datetime(df[dt_col2]).min()
-        _max_dt = pd.to_datetime(df[dt_col2]).max()
+        _min_dt = pd.to_datetime(tsdf[dt_col2]).min()
+        _max_dt = pd.to_datetime(tsdf[dt_col2]).max()
         if pd.isna(_min_dt) or pd.isna(_max_dt):
             st.warning("日時列に有効な値がありません。")
         else:
@@ -698,7 +731,7 @@ with st.expander("時系列（範囲指定・各列の可視化）", expanded=Tr
             if isinstance(rng, tuple) and len(rng) == 2:
                 start_dt = pd.to_datetime(rng[0])
                 end_dt = pd.to_datetime(rng[1]) + pd.Timedelta(days=1)  # 末日を含めるため+1日
-                fdf = tsdf[(df[dt_col2] >= start_dt) & (df[dt_col2] < end_dt)].copy()
+                fdf = tsdf[(tsdf[dt_col2] >= start_dt) & (tsdf[dt_col2] < end_dt)].copy()
             else:
                 fdf = tsdf.copy()
 
@@ -715,7 +748,6 @@ with st.expander("時系列（範囲指定・各列の可視化）", expanded=Tr
                     if mode == "1つのグラフにまとめて表示（多系列）":
                         st.line_chart(plot_df, x=dt_col2, y=sel_cols, use_container_width=True)
                     else:
-                        # 小分け表示：タブで見やすく
                         tabs = st.tabs(sel_cols)
                         for tab, col in zip(tabs, sel_cols):
                             with tab:
@@ -723,7 +755,6 @@ with st.expander("時系列（範囲指定・各列の可視化）", expanded=Tr
                                 st.line_chart(plot_df[[dt_col2, col]].dropna(), x=dt_col2, y=col, use_container_width=True)
                 else:
                     st.info("対象の数値列を選択してください。")
-
 
 # =============================
 # 7) メンテナンス
