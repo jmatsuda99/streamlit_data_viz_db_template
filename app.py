@@ -636,8 +636,8 @@ if proc_table:
 
     st.markdown("### 6-3. 可視化")
     with st.expander("チャート（Line/Bar/Area/Scatter/Hist/Box）", expanded=True):
-st.markdown("#### 時系列（範囲指定・各列の可視化）")
-with st.expander("時系列（日時列＋日付範囲の指定）", expanded=True):
+with st.expander("時系列（範囲指定・各列の可視化）", expanded=True):
+    st.markdown("#### 時系列（範囲指定・各列の可視化）")
     # 日時列の選択
     dt_candidates = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
     if not dt_candidates:
