@@ -722,37 +722,67 @@ with st.expander("時系列（範囲指定・各列の可視化）", expanded=Tr
         if pd.isna(_min_dt) or pd.isna(_max_dt):
             st.warning("日時列に有効な値がありません。")
         else:
-            rng = st.date_input(
-                "表示する日付範囲",
-                value=( _min_dt.date(), _max_dt.date() ),
-                min_value=_min_dt.date(),
-                max_value=_max_dt.date()
-            )
-            if isinstance(rng, tuple) and len(rng) == 2:
-                start_dt = pd.to_datetime(rng[0])
-                end_dt = pd.to_datetime(rng[1]) + pd.Timedelta(days=1)  # 末日を含めるため+1日
-                fdf = tsdf[(tsdf[dt_col2] >= start_dt) & (tsdf[dt_col2] < end_dt)].copy()
-            else:
-                fdf = tsdf.copy()
+            
+            # テキストで日付範囲を指定（例: 05/01~05/31 または 2025/05/01~2025/05/31）
+            def _parse_range_text(txt: str, min_dt: pd.Timestamp, max_dt: pd.Timestamp):
+                txt = (txt or "").strip()
+                if not txt:
+                    return min_dt, max_dt
+                s = re.sub(r"\s*", "", txt)
+                s = s.replace("〜", "~").replace("–", "~").replace("—", "~").replace("-", "~").replace("to", "~")
+                if "~" not in s:
+                    left = right = s
+                else:
+                    left, right = s.split("~", 1)
+
+                def _mk_dt(t: str, is_start: bool):
+                    parts = t.split("/")
+                    if len(parts) == 3:
+                        y, m, d = parts
+                        y = int(y) if len(y) == 4 else (2000 + int(y)) if len(y) == 2 else min_dt.year
+                        m = int(m); d = int(d)
+                    elif len(parts) == 2:
+                        y = min_dt.year
+                        m, d = map(int, parts)
+                    else:
+                        return min_dt if is_start else max_dt
+                    try:
+                        return pd.Timestamp(year=y, month=m, day=d)
+                    except Exception:
+                        return min_dt if is_start else max_dt
+
+                sdt = _mk_dt(left, True)
+                edt = _mk_dt(right, False)
+                if len(left.split("/")) == 2 and len(right.split("/")) == 2 and edt < sdt:
+                    try:
+                        edt = pd.Timestamp(year=sdt.year + 1, month=edt.month, day=edt.day)
+                    except Exception:
+                        pass
+                return sdt, edt + pd.Timedelta(days=1)  # < end でフィルタするため+1日
+
+            default_txt = f'{_min_dt.strftime("%m/%d")}~{_max_dt.strftime("%m/%d")}'
+            rng_txt = st.text_input("日付範囲（例: 05/01~05/31 または 2025/05/01~2025/05/31）", value=default_txt, key="ts_range_txt")
+            start_dt, end_dt_excl = _parse_range_text(rng_txt, _min_dt, _max_dt)
+
+            # 粒度はDBの粒度に従う：リサンプルなしで、そのままフィルタ＆ソート
+            fdf = tsdf[(tsdf[dt_col2] >= start_dt) & (tsdf[dt_col2] < end_dt_excl)].copy()
+            fdf = fdf.sort_values(dt_col2)
 
             # 数値列の候補
             num_cols_all = [c for c in fdf.columns if pd.api.types.is_numeric_dtype(fdf[c])]
             if not num_cols_all:
                 st.info("時系列で描画できる数値列がありません。")
             else:
-                mode = st.radio("表示モード", ["1つのグラフにまとめて表示（多系列）", "列ごとに小分け（スモールマルチプル）"], index=0, horizontal=False)
+                
+                graph_kind = st.radio("グラフ種類", ["折れ線グラフ", "棒グラフ"], index=0, horizontal=True)
                 sel_cols = st.multiselect("対象の数値列", num_cols_all, default=num_cols_all[: min(3, len(num_cols_all))])
 
                 if sel_cols:
-                    plot_df = fdf[[dt_col2] + sel_cols].dropna(subset=[dt_col2]).sort_values(dt_col2)
-                    if mode == "1つのグラフにまとめて表示（多系列）":
+                    plot_df = fdf[[dt_col2] + sel_cols].dropna(subset=[dt_col2])
+                    if graph_kind == "折れ線グラフ":
                         st.line_chart(plot_df, x=dt_col2, y=sel_cols, use_container_width=True)
                     else:
-                        tabs = st.tabs(sel_cols)
-                        for tab, col in zip(tabs, sel_cols):
-                            with tab:
-                                st.write(f"**{col}**")
-                                st.line_chart(plot_df[[dt_col2, col]].dropna(), x=dt_col2, y=col, use_container_width=True)
+                        st.bar_chart(plot_df, x=dt_col2, y=sel_cols, use_container_width=True)
                 else:
                     st.info("対象の数値列を選択してください。")
 
