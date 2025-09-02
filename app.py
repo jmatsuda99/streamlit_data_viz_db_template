@@ -258,7 +258,7 @@ st.subheader("SQL クエリ実行（自由に読み込み）")
 def _default_sql():
     if len(cat_df) > 0:
         t0 = cat_df.iloc[0]["table_name"]
-        return f'SELECT * FROM "{t0}" LIMIT 100;'
+        return f'SELECT * FROM "{t0}";'
     return "-- ここにSQLを書いてください (例)\n-- SELECT * FROM \"table_name\" LIMIT 100;"
 
 sql = st.text_area("SQL", value=_default_sql(), height=140, help='列名にスペース等がある場合は \"列名\" とダブルクォートで囲んでください')
@@ -473,8 +473,257 @@ if schema_table:
 
 st.sidebar.divider()
 
+
 # =============================
-# 6) メンテナンス
+# 6) データ処理 & 可視化（加工 → グラフ → 保存）
+# =============================
+st.subheader("データ処理 & 可視化（加工 → グラフ → 保存）")
+proc_table = st.selectbox("処理対象テーブルを選択", [""] + cat_df["table_name"].tolist(), index=0, key="proc_tbl")
+
+def _save_df_to_db(df: pd.DataFrame, source_tag: str, note: str = "(processed)"):
+    base = ensure_unique_table_name(sanitize_name(source_tag + "_proc"))
+    con = get_conn()
+    con.register("_tmp_proc_save", df)
+    con.execute(f'CREATE TABLE "{base}" AS SELECT * FROM _tmp_proc_save;')
+    con.unregister("_tmp_proc_save")
+    meta = {
+        "table_name": base,
+        "source_file": f"__from:{source_tag}",
+        "sheet_name": note,
+        "rows": int(len(df)),
+        "cols": int(len(df.columns)),
+        "columns_json": json.dumps(list(df.columns), ensure_ascii=False),
+        "uploaded_at": dt.datetime.now(),
+    }
+    con.execute(
+        f"INSERT OR REPLACE INTO {CATALOG_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            meta["table_name"],
+            meta["source_file"],
+            meta["sheet_name"],
+            meta["rows"],
+            meta["cols"],
+            meta["columns_json"],
+            meta["uploaded_at"],
+        ],
+    )
+    return base
+
+if proc_table:
+    con = get_conn()
+    src = con.execute(f'SELECT * FROM "{proc_table}"').fetchdf()
+
+    st.markdown("### 6-1. 前処理")
+    with st.expander("型変換 / 日付列 / 欠損 / フィルタ / 計算列", expanded=False):
+        # 型推定 & 日付列
+        cols = list(src.columns)
+        date_cols = st.multiselect("日付として解釈する列（任意）", cols, default=[c for c in cols if re.search(r"date|日時|日付|time|timestamp", str(c), re.I)])
+        df = src.copy()
+        for c in date_cols:
+            try:
+                df[c] = pd.to_datetime(df[c], errors="coerce")
+            except Exception:
+                pass
+
+        # 欠損処理
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            drop_na_cols = st.multiselect("欠損がある行を除外する列（任意）", cols, default=[])
+        with c2:
+            fill_na_cols = st.multiselect("欠損を0で埋める列（任意）", cols, default=[])
+        with c3:
+            fill_na_str_cols = st.multiselect("欠損を空文字で埋める列（任意）", cols, default=[])
+
+        if drop_na_cols:
+            df = df.dropna(subset=drop_na_cols)
+        for c in fill_na_cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        for c in fill_na_str_cols:
+            if c in df.columns:
+                df[c] = df[c].fillna("")
+
+        # フィルタ（pandas.query 式）
+        filt = st.text_input("フィルタ条件（pandas.query 式）例: 金額 > 1000 and カテゴリ=='A'", value="")
+        if filt.strip():
+            try:
+                df = df.query(filt)
+            except Exception as e:
+                st.warning(f"フィルタ式エラー: {e}")
+
+        # 計算列（pandas.eval）
+        calc = st.text_input("計算列（pandas.eval 式）例: 利益 = 売上 - 原価", value="")
+        if calc.strip():
+            try:
+                # 形式: 新列名 = 式
+                if "=" in calc:
+                    new_col, expr = calc.split("=", 1)
+                    new_col = new_col.strip()
+                    expr = expr.strip()
+                    df[new_col] = pd.eval(expr, engine="python", target=df)
+                else:
+                    st.warning("『新列名 = 式』の形式で入力してください。")
+            except Exception as e:
+                st.warning(f"計算列エラー: {e}")
+
+        st.dataframe(df.head(200), use_container_width=True, hide_index=True)
+
+    st.markdown("### 6-2. 集計 / ピボット / 時系列処理")
+    with st.expander("集計（groupby）", expanded=False):
+        g_cols = st.multiselect("グループ化キー（複数可）", df.columns.tolist(), default=[])
+        agg_targets = st.multiselect("数値列（集計対象）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[])
+        agg_func = st.selectbox("集計関数", ["sum", "mean", "median", "min", "max", "count"], index=0)
+        if st.button("集計を実行"):
+            if g_cols and agg_targets:
+                agg_df = df.groupby(g_cols, dropna=False)[agg_targets].agg(agg_func).reset_index()
+                st.success(f"集計結果: {len(agg_df)} 行")
+                st.dataframe(agg_df.head(200), use_container_width=True, hide_index=True)
+                csv_b = agg_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("集計結果CSVダウンロード", data=csv_b, file_name="groupby_result.csv", mime="text/csv")
+                if st.button("集計結果をDBに保存"):
+                    new_tbl = _save_df_to_db(agg_df, proc_table, note="(groupby)")
+                    st.info(f"保存テーブル: {new_tbl}")
+
+    with st.expander("ピボット（pivot）", expanded=False):
+        idx_cols = st.multiselect("行（index）", df.columns.tolist(), default=[])
+        col_cols = st.multiselect("列（columns）", df.columns.tolist(), default=[])
+        val_col = st.selectbox("値（values）", df.columns.tolist(), index=0)
+        agg_func_pivot = st.selectbox("集計関数（ピボット）", ["sum", "mean", "count", "min", "max"], index=0)
+        if st.button("ピボットを実行"):
+            try:
+                pvt = pd.pivot_table(df, index=idx_cols if idx_cols else None, columns=col_cols if col_cols else None,
+                                     values=val_col, aggfunc=agg_func_pivot, fill_value=0).reset_index()
+                st.success(f"ピボット結果: {len(pvt)} 行")
+                st.dataframe(pvt.head(200), use_container_width=True, hide_index=True)
+                csv_b = pvt.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("ピボット結果CSVダウンロード", data=csv_b, file_name="pivot_result.csv", mime="text/csv")
+                if st.button("ピボット結果をDBに保存"):
+                    new_tbl = _save_df_to_db(pvt, proc_table, note="(pivot)")
+                    st.info(f"保存テーブル: {new_tbl}")
+            except Exception as e:
+                st.warning(f"ピボットエラー: {e}")
+
+    with st.expander("時系列処理（リサンプル/ローリング）", expanded=False):
+        dt_col = st.selectbox("日時列", [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])], index=0 if any(pd.api.types.is_datetime64_any_dtype(df[c]) for c in df.columns) else None)
+        num_col = st.selectbox("対象数値列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None)
+        if dt_col and num_col:
+            freq = st.selectbox("リサンプル頻度", ["D","W","M","H","15T","5T","T"], index=0, help="D=日, W=週, M=月, H=時, T=分")
+            method = st.selectbox("集計（リサンプル）", ["sum","mean","max","min","count"], index=0)
+            roll_win = st.number_input("ローリング窓（ポイント数）", min_value=0, value=0, step=1)
+            if st.button("時系列処理を実行"):
+                try:
+                    ts = df[[dt_col, num_col]].dropna().copy()
+                    ts = ts.sort_values(dt_col)
+                    ts = ts.set_index(dt_col).resample(freq)[num_col]
+                    if method == "sum": ts = ts.sum()
+                    elif method == "mean": ts = ts.mean()
+                    elif method == "max": ts = ts.max()
+                    elif method == "min": ts = ts.min()
+                    elif method == "count": ts = ts.count()
+                    ts = ts.to_frame(name=f"{num_col}_{method}")
+                    if roll_win and roll_win > 0:
+                        ts[f"{num_col}_{method}_rolling{roll_win}"] = ts.iloc[:,0].rolling(roll_win, min_periods=1).mean()
+                    ts = ts.reset_index()
+                    st.success(f"時系列結果: {len(ts)} 行")
+                    st.dataframe(ts.head(200), use_container_width=True, hide_index=True)
+                    csv_b = ts.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button("時系列結果CSVダウンロード", data=csv_b, file_name="timeseries_result.csv", mime="text/csv")
+                    if st.button("時系列結果をDBに保存"):
+                        new_tbl = _save_df_to_db(ts, proc_table, note="(timeseries)")
+                        st.info(f"保存テーブル: {new_tbl}")
+                except Exception as e:
+                    st.warning(f"時系列エラー: {e}")
+
+    st.markdown("### 6-3. 可視化")
+    with st.expander("チャート（Line/Bar/Area/Scatter/Hist/Box）", expanded=True):
+st.markdown("#### 時系列（範囲指定・各列の可視化）")
+with st.expander("時系列（日時列＋日付範囲の指定）", expanded=True):
+    # 日時列の選択
+    dt_candidates = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    if not dt_candidates:
+        st.info("まず『前処理』で日付として解釈する列を指定し、日時列を作成してください。")
+    else:
+        dt_col2 = st.selectbox("日時列（時系列のX軸）", dt_candidates, index=0, key="ts_dtcol")
+        # 日付範囲（データの最小～最大）
+        _min_dt = pd.to_datetime(df[dt_col2]).min()
+        _max_dt = pd.to_datetime(df[dt_col2]).max()
+        if pd.isna(_min_dt) or pd.isna(_max_dt):
+            st.warning("日時列に有効な値がありません。")
+        else:
+            rng = st.date_input(
+                "表示する日付範囲",
+                value=( _min_dt.date(), _max_dt.date() ),
+                min_value=_min_dt.date(),
+                max_value=_max_dt.date()
+            )
+            if isinstance(rng, tuple) and len(rng) == 2:
+                start_dt = pd.to_datetime(rng[0])
+                end_dt = pd.to_datetime(rng[1]) + pd.Timedelta(days=1)  # 末日を含めるため+1日
+                fdf = df[(df[dt_col2] >= start_dt) & (df[dt_col2] < end_dt)].copy()
+            else:
+                fdf = df.copy()
+
+            # 数値列の候補
+            num_cols_all = [c for c in fdf.columns if pd.api.types.is_numeric_dtype(fdf[c])]
+            if not num_cols_all:
+                st.info("時系列で描画できる数値列がありません。")
+            else:
+                mode = st.radio("表示モード", ["1つのグラフにまとめて表示（多系列）", "列ごとに小分け（スモールマルチプル）"], index=0, horizontal=False)
+                sel_cols = st.multiselect("対象の数値列", num_cols_all, default=num_cols_all[: min(3, len(num_cols_all))])
+
+                if sel_cols:
+                    plot_df = fdf[[dt_col2] + sel_cols].dropna(subset=[dt_col2]).sort_values(dt_col2)
+                    if mode == "1つのグラフにまとめて表示（多系列）":
+                        st.line_chart(plot_df, x=dt_col2, y=sel_cols, use_container_width=True)
+                    else:
+                        # 小分け表示：タブで見やすく
+                        tabs = st.tabs(sel_cols)
+                        for tab, col in zip(tabs, sel_cols):
+                            with tab:
+                                st.write(f"**{col}**")
+                                st.line_chart(plot_df[[dt_col2, col]].dropna(), x=dt_col2, y=col, use_container_width=True)
+                else:
+                    st.info("対象の数値列を選択してください。")
+
+        chart_type = st.selectbox("チャートタイプ", ["line","bar","area","scatter","hist","box"], index=0)
+        x_col = st.selectbox("X軸", df.columns.tolist(), index=0)
+        y_cols = st.multiselect("Y軸（複数可・line/bar/area）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])][:1])
+        if chart_type in ["line","bar","area"] and x_col and y_cols:
+            plot_df = df[[x_col] + y_cols].dropna()
+            plot_df = plot_df.sort_values(x_col)
+            if chart_type == "line":
+                st.line_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
+            elif chart_type == "bar":
+                st.bar_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
+            elif chart_type == "area":
+                # area は簡易的に line_chart を流用
+                st.area_chart(plot_df, x=x_col, y=y_cols, use_container_width=True)
+        elif chart_type == "scatter":
+            x_s = st.selectbox("X（数値）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="scx")
+            y_s = st.selectbox("Y（数値）", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="scy")
+            if x_s and y_s:
+                plot_df = df[[x_s, y_s]].dropna()
+                st.scatter_chart(plot_df, x=x_s, y=y_s, use_container_width=True)
+        elif chart_type == "hist":
+            num_h = st.selectbox("対象数値列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], index=0 if any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns) else None, key="histn")
+            bins = st.slider("ビン数", min_value=5, max_value=100, value=30)
+            if num_h:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots()
+                ax.hist(pd.to_numeric(df[num_h], errors="coerce").dropna(), bins=bins)
+                ax.set_xlabel(num_h); ax.set_ylabel("count")
+                st.pyplot(fig, use_container_width=True)
+        elif chart_type == "box":
+            num_b = st.multiselect("箱ひげ対象列", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], default=[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])][:1])
+            if num_b:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots()
+                ax.boxplot([pd.to_numeric(df[c], errors="coerce").dropna() for c in num_b], labels=num_b, vert=True)
+                st.pyplot(fig, use_container_width=True)
+
+
+# =============================
+# 7) メンテナンス
 # =============================
 st.sidebar.header("メンテナンス")
 if st.sidebar.button("カタログ再読み込み"):
