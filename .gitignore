@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.xlsx
+*.csv
+app_data.duckdb
+.streamlit/secrets.toml
+.env
